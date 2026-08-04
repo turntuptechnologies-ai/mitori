@@ -7,6 +7,7 @@
  * CORS 許可は curl で別途確認済み。ここで見たいのはロジックと応答形式の整合。
  */
 import { normalizeDomain, runScan } from '../src/lib/scan'
+import { collectTasks, MANUAL_ITEMS } from '../src/lib/manual'
 
 const input = process.argv[2] ?? 'example.com'
 const domain = normalizeDomain(input)
@@ -33,6 +34,18 @@ for (const r of report.results) {
   console.log(`    ${r.summary}`)
   for (const e of r.evidence ?? []) console.log(`      - ${e}`)
 }
+const tasks = collectTasks(report.results)
+if (tasks.size) {
+  const derived = [...tasks.values()].flat().length
+  console.log(`\n## 検査から作られた具体タスク (${derived})`)
+  for (const item of MANUAL_ITEMS) {
+    const found = tasks.get(item.id)
+    if (!found?.length) continue
+    console.log(`  ${item.text}`)
+    for (const t of found) console.log(`    □ ${t.text}`)
+  }
+}
+
 if (report.notes.length) {
   console.log('\n## notes')
   for (const n of report.notes) console.log(`  ! ${n}`)

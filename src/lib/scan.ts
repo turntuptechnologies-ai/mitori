@@ -22,6 +22,7 @@ import {
   SRV_PROBES,
   TOKEN_SIGNATURES,
 } from './signatures'
+import { makeTask } from './manual'
 import { makeResult, type CheckResult, type ScanReport } from './types'
 
 /** 入力を検査可能なホスト名に正規化する。URL・スキーム・末尾ドットを許容する */
@@ -207,6 +208,16 @@ const CHECKS: Check[] = [
             ? undefined
             : 'MX を単に消すより、null MX（`0 .`）を置くほうが「受け取らない」意思を送信側に伝えられます',
         evidence: mx,
+        // 受信が生きているうちにしか中身は確認できない。MX を消してからでは手遅れ
+        tasks: alive
+          ? [
+              makeTask(
+                'inv-mailflow',
+                'mx',
+                'MX が生きているうちに、届いているメールの送信元と内容を確認する',
+              ),
+            ]
+          : [],
       })
     },
   },
@@ -243,6 +254,9 @@ const CHECKS: Check[] = [
           ? `各サービス側でドメイン登録を解除してから TXT を削除してください。${hints.length ? '\n' + hints.join('\n') : ''}`
           : undefined,
         evidence: found,
+        tasks: [...services].map((service) =>
+          makeTask('det-tenant', service, `${service} 側でこのドメインの登録を解除する`),
+        ),
       })
     },
   },
@@ -253,16 +267,19 @@ const CHECKS: Check[] = [
       const hostHits = await Promise.all(
         MICROSOFT_HOSTS.map(async (h) => {
           const cname = await records(`${h.host}.${domain}`, 'CNAME')
-          return cname.length ? `${h.host}.${domain} → ${cname.join(', ')} (${h.label})` : null
+          if (!cname.length) return null
+          return { name: `${h.host}.${domain}`, label: h.label, target: cname.join(', ') }
         }),
       )
       const srvHits = await Promise.all(
         SRV_PROBES.map(async (s) => {
           const srv = await records(`${s.name}.${domain}`, 'SRV')
-          return srv.length ? `${s.name}.${domain} → ${srv.join(', ')} (${s.label})` : null
+          if (!srv.length) return null
+          return { name: `${s.name}.${domain}`, label: s.label, target: srv.join(', ') }
         }),
       )
-      const evidence = [...hostHits, ...srvHits].filter((x): x is string => x !== null)
+      const hits = [...hostHits, ...srvHits].filter((x) => x !== null)
+      const evidence = hits.map((h) => `${h.name} → ${h.target} (${h.label})`)
       const hit = evidence.length > 0
       return makeResult({
         id: 'ms365',
@@ -277,6 +294,9 @@ const CHECKS: Check[] = [
           ? 'テナントからドメインを削除したうえで、CNAME / SRV を消してください'
           : undefined,
         evidence,
+        tasks: hits.map((h) =>
+          makeTask('det-tenant', h.name, `${h.label}（${h.name}）をテナント側から解除する`),
+        ),
       })
     },
   },
@@ -302,6 +322,12 @@ const CHECKS: Check[] = [
           ? 'コンテンツを案内 1 枚まで削り、段階的にリダイレクトを弱めてから A / AAAA / CNAME を削除してください'
           : undefined,
         evidence,
+        tasks: [
+          ...(apex ? [makeTask('cool-content', domain, `${domain} を案内 1 枚まで削る`)] : []),
+          ...(www
+            ? [makeTask('cool-content', `www.${domain}`, `www.${domain} を案内 1 枚まで削る`)]
+            : []),
+        ],
       })
     },
   },
@@ -334,6 +360,9 @@ const CHECKS: Check[] = [
           ? '各サブドメインの用途を確認し、参照元を切り替えてから DNS レコードを削除してください'
           : undefined,
         evidence: [...alive, ...notes],
+        tasks: alive.map((host) =>
+          makeTask('det-assets', host, `${host} が外部から参照されていないか確認し、あれば移設する`),
+        ),
       })
     },
   },
@@ -552,6 +581,10 @@ const CHECKS: Check[] = [
     run: async (domain) => {
       const txt = await txtRecords(domain)
       const spf = txt.filter((t) => /^v=spf1\b/i.test(t))
+      // include: 先は「このドメインを送信元として使っている系統」の一覧そのもの
+      const includes = [
+        ...new Set(spf.flatMap((r) => [...r.matchAll(/include:(\S+)/gi)].map((m) => m[1]!))),
+      ]
       return makeResult({
         id: 'mail-spf',
         phase: 'detach',
@@ -565,6 +598,13 @@ const CHECKS: Check[] = [
           ? '他ドメインの SPF から include: されていないかを確認してから削除してください'
           : undefined,
         evidence: spf,
+        tasks: includes.map((host) =>
+          makeTask(
+            'det-spf-include',
+            host,
+            `送信システム ${host} が、このドメインを送信元として使っていないか確認する`,
+          ),
+        ),
       })
     },
   },
@@ -717,6 +757,14 @@ const CHECKS: Check[] = [
           ? `有効期限は ${info.expiresAt.slice(0, 10)} です`
           : '登録情報を取得しました',
         evidence,
+        tasks: [
+          makeTask(
+            'rel-autorenew',
+            'registrar',
+            `${info.registrar ?? 'レジストラ'} の管理画面で自動更新を意図した状態にする` +
+              (info.expiresAt ? `（有効期限 ${info.expiresAt.slice(0, 10)}）` : ''),
+          ),
+        ],
       })
     },
   },
@@ -816,6 +864,15 @@ const CHECKS: Check[] = [
             'アーカイブが無いページは、消える前にスナップショットを取っておく必要があります。'
           : '本文からの参照ではないため急ぎませんが、リンク先が第三者のものになることは変わりません。',
         evidence,
+        tasks: wm.found
+          .filter((p) => p.articles.length > 0)
+          .map((p) =>
+            makeTask(
+              'det-request',
+              p.project.host,
+              `${p.project.label} の ${p.articles.length} ページについて、出典をアーカイブ版へ差し替える（自分で編集するか依頼する）`,
+            ),
+          ),
       })
     },
   },
