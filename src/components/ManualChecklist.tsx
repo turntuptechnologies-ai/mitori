@@ -1,5 +1,13 @@
 import { useMemo } from 'react'
-import { collectTasks, MANUAL_ITEMS, MANUAL_PHASE_LABEL, type ManualItem } from '../lib/manual'
+import {
+  collectTasks,
+  MANUAL_CATEGORY_LABEL,
+  MANUAL_CATEGORY_ORDER,
+  MANUAL_ITEMS,
+  MANUAL_PHASE_LABEL,
+  type ManualCategory,
+  type ManualItem,
+} from '../lib/manual'
 import type { CheckResult, DerivedTask } from '../lib/types'
 
 interface Props {
@@ -16,6 +24,30 @@ const PHASES: ManualItem['phase'][] = [
   'release',
   'after',
 ]
+
+/**
+ * 検査結果の重大度バッジ（塗りつぶし）と混同されないよう、分類は点で示す。
+ * 色が意味を持つのは分類の識別だけで、危険度とは無関係。
+ */
+const CATEGORY_DOT: Record<ManualCategory, string> = {
+  mail: 'bg-sky-500',
+  web: 'bg-violet-500',
+  service: 'bg-teal-500',
+  domain: 'bg-orange-500',
+  offline: 'bg-stone-400',
+  record: 'bg-indigo-500',
+}
+
+function CategoryTag({ category }: { category: ManualCategory }) {
+  return (
+    <span className="mr-1.5 inline-flex items-center gap-1 align-middle whitespace-nowrap">
+      <span className={`size-1.5 rounded-full ${CATEGORY_DOT[category]}`} aria-hidden />
+      <span className="text-[11px] text-stone-500 dark:text-stone-400">
+        {MANUAL_CATEGORY_LABEL[category]}
+      </span>
+    </span>
+  )
+}
 
 function Checkbox({
   id,
@@ -66,8 +98,22 @@ function DerivedTaskRow({
 
 export function ManualChecklist({ results, checked, onToggle }: Props) {
   const tasks = useMemo(() => collectTasks(results), [results])
-
   const derived = useMemo(() => [...tasks.values()].flat(), [tasks])
+
+  // 分類ごとの進み具合。生成タスクは親項目の分類として数える
+  const byCategory = useMemo(() => {
+    const counts = new Map<ManualCategory, { total: number; done: number }>()
+    for (const item of MANUAL_ITEMS) {
+      const c = counts.get(item.category) ?? { total: 0, done: 0 }
+      for (const id of [item.id, ...(tasks.get(item.id) ?? []).map((t) => t.id)]) {
+        c.total += 1
+        if (checked.has(id)) c.done += 1
+      }
+      counts.set(item.category, c)
+    }
+    return counts
+  }, [tasks, checked])
+
   const total = MANUAL_ITEMS.length + derived.length
   const done =
     MANUAL_ITEMS.filter((i) => checked.has(i.id)).length +
@@ -84,6 +130,24 @@ export function ManualChecklist({ results, checked, onToggle }: Props) {
             ? `うち ${derived.length} 件は、今回の検査で見つかったものから作られています`
             : 'DNS からは観測できないため、mitori では判定できません'}
         </p>
+      </div>
+
+      <div className="mb-4 flex flex-wrap gap-x-4 gap-y-1.5 rounded-lg border border-stone-200 bg-stone-50 px-3.5 py-2.5 dark:border-stone-800 dark:bg-stone-950">
+        {MANUAL_CATEGORY_ORDER.map((category) => {
+          const c = byCategory.get(category)
+          if (!c) return null
+          return (
+            <span key={category} className="inline-flex items-center gap-1.5">
+              <span className={`size-1.5 rounded-full ${CATEGORY_DOT[category]}`} aria-hidden />
+              <span className="text-xs text-stone-600 dark:text-stone-400">
+                {MANUAL_CATEGORY_LABEL[category]}
+              </span>
+              <span className="font-mono text-xs text-stone-400 dark:text-stone-600">
+                {c.done}/{c.total}
+              </span>
+            </span>
+          )
+        })}
       </div>
 
       <div className="space-y-5">
@@ -103,12 +167,9 @@ export function ManualChecklist({ results, checked, onToggle }: Props) {
                   return (
                     <li key={item.id}>
                       <label className="flex cursor-pointer items-start gap-2.5">
-                        <Checkbox
-                          id={item.id}
-                          checked={checked.has(item.id)}
-                          onToggle={onToggle}
-                        />
+                        <Checkbox id={item.id} checked={checked.has(item.id)} onToggle={onToggle} />
                         <span className="min-w-0">
+                          <CategoryTag category={item.category} />
                           <span
                             className={`text-sm ${
                               checked.has(item.id)

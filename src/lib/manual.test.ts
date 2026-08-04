@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { collectTasks, makeTask } from './manual'
+import {
+  collectTasks,
+  makeTask,
+  MANUAL_CATEGORY_ORDER,
+  MANUAL_ITEMS,
+  type ManualCategory,
+} from './manual'
 import { makeResult, type CheckResult } from './types'
 
 const result = (id: string, tasks: CheckResult['tasks']): CheckResult =>
@@ -12,6 +18,19 @@ const result = (id: string, tasks: CheckResult['tasks']): CheckResult =>
     summary: '',
     tasks,
   })
+
+describe('分類', () => {
+  it('どの分類にも項目が 1 件以上ある', () => {
+    // 使われない分類が凡例に並ぶと、空の枠だけが増えて読みにくくなる。
+    // 型では「実在する分類か」しか見られないので、ここで実際の割り当てを確かめる
+    const used = new Set<ManualCategory>(MANUAL_ITEMS.map((i) => i.category))
+    expect([...used].sort()).toEqual([...MANUAL_CATEGORY_ORDER].sort())
+  })
+
+  it('凡例の並び順に重複が無い', () => {
+    expect(MANUAL_CATEGORY_ORDER).toHaveLength(new Set(MANUAL_CATEGORY_ORDER).size)
+  })
+})
 
 describe('makeTask', () => {
   it('流し込み先と観測対象から id を組み立てる', () => {
