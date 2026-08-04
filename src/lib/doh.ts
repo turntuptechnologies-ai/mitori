@@ -20,10 +20,12 @@ export interface DnsResponse {
 }
 
 const ENDPOINTS = [
-  (name: string, type: string) =>
-    `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${type}`,
-  (name: string, type: string) =>
-    `https://dns.google/resolve?name=${encodeURIComponent(name)}&type=${type}`,
+  (name: string, type: string, dnssec: boolean) =>
+    `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${type}` +
+    (dnssec ? '&do=1' : ''),
+  (name: string, type: string, dnssec: boolean) =>
+    `https://dns.google/resolve?name=${encodeURIComponent(name)}&type=${type}` +
+    (dnssec ? '&do=1' : ''),
 ]
 
 /** NOERROR */
@@ -64,8 +66,18 @@ async function fetchOnce(url: string): Promise<DnsResponse> {
   return (await res.json()) as DnsResponse
 }
 
-export function resolve(name: string, type: string): Promise<DnsResponse> {
-  const key = `${name}|${type}`
+export interface ResolveOptions {
+  /** DO ビットを立て、Authority セクションに NSEC / NSEC3 を含めさせる */
+  dnssec?: boolean
+}
+
+export function resolve(
+  name: string,
+  type: string,
+  options: ResolveOptions = {},
+): Promise<DnsResponse> {
+  const dnssec = options.dnssec === true
+  const key = `${name}|${type}|${dnssec ? 'do' : ''}`
   const hit = cache.get(key)
   if (hit) return hit
 
@@ -73,7 +85,7 @@ export function resolve(name: string, type: string): Promise<DnsResponse> {
     let lastError: unknown
     for (const build of ENDPOINTS) {
       try {
-        return await fetchOnce(build(name, type))
+        return await fetchOnce(build(name, type, dnssec))
       } catch (err) {
         lastError = err
       }
@@ -103,6 +115,9 @@ export const TYPE_CODE: Record<string, number> = {
   AAAA: 28,
   SRV: 33,
   DS: 43,
+  RRSIG: 46,
+  NSEC: 47,
+  NSEC3: 50,
   CAA: 257,
 }
 

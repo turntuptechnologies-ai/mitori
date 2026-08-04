@@ -10,7 +10,8 @@ import {
   type CaaRecord,
 } from './doh'
 import { fetchIssuances, resetCtCache } from './ct'
-import { describeVerdict, inspectCname, type CnameInspection } from './dangling'
+import { describeVerdict, inspectCname, isServiceName, type CnameInspection } from './dangling'
+import { NSEC_MODE_LABEL, WALK_STOP_LABEL, walkZone, type WalkResult } from './nsec'
 import { lookupRdap } from './rdap'
 import { checkWayback, formatWaybackTimestamp } from './wayback'
 import {
@@ -56,6 +57,13 @@ function isNullMx(mx: string[]): boolean {
 /** サブドメインの生存確認は DoH クエリ数がかさむため上限を設ける */
 const SUBDOMAIN_PROBE_LIMIT = 40
 
+/**
+ * NSEC ウォークは 1 名前 1 クエリの直列処理で、他の検査と違って並列化できない。
+ * 件数だけで縛ると回線が遅いときに何十秒も待たされるため、時間でも縛る。
+ * どちらで打ち切ったかは必ず結果に出す。
+ */
+const NSEC_WALK_LIMITS = { maxNames: 60, budgetMs: 6000 }
+
 interface Candidates {
   /** 実際に検査したホスト名 */
   probed: string[]
@@ -66,24 +74,44 @@ interface Candidates {
   notes: string[]
 }
 
+// ウォークは直列で時間がかかるため、検査間で共有する
+const walkCache = new Map<string, Promise<WalkResult>>()
+
+function walkOnce(domain: string): Promise<WalkResult> {
+  const hit = walkCache.get(domain)
+  if (hit) return hit
+  const promise = walkZone(domain, NSEC_WALK_LIMITS)
+  walkCache.set(domain, promise)
+  return promise
+}
+
 /**
  * サブドメイン候補を組み立てる。
  * CT ログと辞書の和集合。呼び出し元が複数あるが、CT も DoH もキャッシュされるため
  * 実際の通信は 1 回で済む。
  */
 async function collectCandidates(domain: string): Promise<Candidates> {
-  const ct = await fetchIssuances(domain)
-  const candidates = new Set<string>()
+  const [ct, walk] = await Promise.all([fetchIssuances(domain), walkOnce(domain)])
+
+  // NSEC で得た名前は実在が確定しているので、上限を掛けるときに優先して残す
+  const ordered: string[] = [...walk.names]
+  const push = (name: string) => {
+    if (name !== domain && !ordered.includes(name)) ordered.push(name)
+  }
   for (const name of ct.names) {
     // ワイルドカードは実ホストではないので候補にしない
     if (name.startsWith('*.')) continue
-    if (name === domain || name.endsWith(`.${domain}`)) candidates.add(name)
+    if (name.endsWith(`.${domain}`)) push(name)
   }
-  for (const sub of COMMON_SUBDOMAINS) candidates.add(`${sub}.${domain}`)
-  candidates.delete(domain)
+  for (const sub of COMMON_SUBDOMAINS) push(`${sub}.${domain}`)
 
-  const list = [...candidates].sort()
+  const list = ordered.filter((name) => name !== domain)
   const notes: string[] = []
+  if (walk.names.length) {
+    notes.push(
+      `NSEC ウォークでゾーンから ${walk.names.length} 件の名前を列挙しました。${WALK_STOP_LABEL[walk.stop]}`,
+    )
+  }
   if (!ct.ok && ct.reason) {
     notes.push(`CT ログ: ${ct.reason}（辞書のみで検査しました）`)
   } else {
@@ -277,11 +305,61 @@ const CHECKS: Check[] = [
     },
   },
   {
+    id: 'nsec',
+    label: 'ゾーンの列挙可能性',
+    run: async (domain, ctx) => {
+      if (!ctx.exists) {
+        return makeResult({
+          id: 'nsec',
+          phase: 'inventory',
+          title: 'ゾーンの列挙可能性（NSEC）',
+          severity: 'low',
+          status: 'unknown',
+          summary: 'ドメインが DNS 上に存在しないため、評価対象外です',
+        })
+      }
+
+      const walk = await walkOnce(domain)
+      const label = NSEC_MODE_LABEL[walk.mode]
+
+      if (walk.mode !== 'nsec') {
+        return makeResult({
+          id: 'nsec',
+          phase: 'inventory',
+          title: 'ゾーンの列挙可能性（NSEC）',
+          severity: 'low',
+          status: 'clear',
+          summary: `${label}。ゾーンの全名前を第三者に列挙されることはありません`,
+          advice:
+            walk.mode === 'unavailable'
+              ? undefined
+              : 'この方式なら、棚卸しの網羅性は CT ログと辞書に頼ることになります',
+        })
+      }
+
+      return makeResult({
+        id: 'nsec',
+        phase: 'inventory',
+        title: 'ゾーンの列挙可能性（NSEC）',
+        severity: 'low',
+        // 列挙できたことは棚卸しには有利だが、裏を返せば誰にでも全名前が見えている
+        status: 'warn',
+        summary:
+          `${label}。${walk.names.length} 件の名前を列挙しました。` +
+          WALK_STOP_LABEL[walk.stop],
+        advice:
+          'ここで得た名前は推測ではなくゾーンが公開しているものです。棚卸しには有利ですが、' +
+          '同じ手順を誰でも実行できます。運用を続けるなら NSEC3 への移行を検討してください。',
+        evidence: walk.names,
+      })
+    },
+  },
+  {
     id: 'dangling-cname',
     label: 'dangling CNAME',
     run: async (domain) => {
       const { probed, notes } = await collectCandidates(domain)
-      const hosts = [domain, ...probed]
+      const hosts = [domain, ...probed].filter((h) => !isServiceName(h))
 
       const inspections = (await Promise.all(hosts.map(inspectCname))).filter(
         (i): i is CnameInspection => i !== null,
@@ -655,6 +733,7 @@ export async function runScan(
 ): Promise<ScanReport> {
   resetCache()
   resetCtCache()
+  walkCache.clear()
   const startedAt = new Date().toISOString()
   const results: CheckResult[] = []
   const notes: string[] = []

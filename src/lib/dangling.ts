@@ -76,6 +76,20 @@ export const TAKEOVER_PRONE: Array<{ suffix: string; service: string }> = [
   { suffix: '.acquia-sites.com', service: 'Acquia' },
 ]
 
+/**
+ * `_dmarc` `_acme-challenge` `_25._tcp` `_openpgpkey` のようなアンダースコア始まりの名前は
+ * プロトコル専用で、TXT / TLSA / OPENPGPKEY など A 以外のレコード型を使う。
+ *
+ * これらを dangling 判定に掛けると、正常な設定を軒並み「向き先にアドレスが無い」と
+ * 誤検出する（実測で nlnetlabs.nl の 6 件中 6 件が該当した）。
+ * 型ごとに引き直せば厳密に判定できるがクエリ数が跳ね上がるうえ、
+ * これらの名前はブラウザから到達する先ではないので、乗っ取りの主経路にもならない。
+ * よって dangling 検査の対象から外す。
+ */
+export function isServiceName(host: string): boolean {
+  return host.split('.').some((label) => label.startsWith('_'))
+}
+
 export function matchTakeoverService(target: string): string | undefined {
   const normalized = target.replace(/\.$/, '').toLowerCase()
   return TAKEOVER_PRONE.find((s) => normalized.endsWith(s.suffix))?.service
@@ -83,25 +97,36 @@ export function matchTakeoverService(target: string): string | undefined {
 
 export type CnameVerdict = 'ok' | 'dangling' | 'nodata' | 'takeover-prone'
 
-/**
- * 向き先の解決結果から判定する純粋関数。
- *
- * @param targetRcode  向き先に A を引いたときの rcode
- * @param targetHasAddress 向き先が A / AAAA / CNAME のいずれかを持つか
- * @param service 乗っ取られやすいサービスに該当するならその名前
- */
-export function classifyCnameTarget(
-  targetRcode: number,
-  targetHasAddress: boolean,
-  service: string | undefined,
-): CnameVerdict {
+export interface TargetProbe {
+  /** 向き先に A を引いたときの rcode */
+  rcode: number
+  /** 向き先が A / AAAA / CNAME のいずれかを持つか */
+  hasAddress: boolean
+  /**
+   * アドレス以外のレコード（TXT など）を持つか。
+   * `_acme-challenge` や `_domainkey` の CNAME は、TXT しか持たないホストを指すのが
+   * 正当な使い方なので、これを見ないと正常な設定を「切れている」と誤判定する。
+   */
+  hasOtherRecords: boolean
+  /** 乗っ取られやすいサービスに該当するならその名前 */
+  service?: string
+}
+
+/** 向き先の解決結果から判定する純粋関数 */
+export function classifyCnameTarget(probe: TargetProbe): CnameVerdict {
   // 向き先の名前自体が存在しない。CNAME は確実に切れている
-  if (targetRcode === RCODE_NXDOMAIN) return 'dangling'
-  // NXDOMAIN を返さないゾーンが多いため、アドレスを持たないことのほうが実用上の主軸になる。
-  // dangling ほど断定的ではないが、扱いは同じ「要対応」
-  if (!targetHasAddress) return 'nodata'
+  if (probe.rcode === RCODE_NXDOMAIN) return 'dangling'
+
+  if (!probe.hasAddress) {
+    // TXT だけを持つ向き先は、DKIM や ACME の委譲として正当
+    if (probe.hasOtherRecords) return 'ok'
+    // NXDOMAIN を返さないゾーンが多いため、アドレスを持たないことのほうが実用上の主軸になる。
+    // dangling ほど断定的ではないが、扱いは同じ「要対応」
+    return 'nodata'
+  }
+
   // 解決はする。プロバイダのワイルドカードで生きているだけかもしれない
-  if (service) return 'takeover-prone'
+  if (probe.service) return 'takeover-prone'
   return 'ok'
 }
 
@@ -118,20 +143,25 @@ export async function inspectCname(host: string): Promise<CnameInspection | null
   if (!cnames.length) return null
 
   const target = cnames[0]!.replace(/\.$/, '')
-  const [aRes, aaaa, targetCname] = await Promise.all([
+  const [aRes, aaaa, targetCname, txt] = await Promise.all([
     resolve(target, 'A'),
     records(target, 'AAAA'),
     records(target, 'CNAME'),
+    records(target, 'TXT'),
   ])
 
-  const hasAddress =
-    (aRes.Answer?.length ?? 0) > 0 || aaaa.length > 0 || targetCname.length > 0
+  const hasAddress = (aRes.Answer?.length ?? 0) > 0 || aaaa.length > 0 || targetCname.length > 0
   const service = matchTakeoverService(target)
 
   return {
     host,
     target,
-    verdict: classifyCnameTarget(aRes.Status, hasAddress, service),
+    verdict: classifyCnameTarget({
+      rcode: aRes.Status,
+      hasAddress,
+      hasOtherRecords: txt.length > 0,
+      service,
+    }),
     service,
   }
 }
