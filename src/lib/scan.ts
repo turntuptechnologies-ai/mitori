@@ -10,6 +10,7 @@ import {
   type CaaRecord,
 } from './doh'
 import { fetchIssuances, resetCtCache } from './ct'
+import { describeVerdict, inspectCname, type CnameInspection } from './dangling'
 import { lookupRdap } from './rdap'
 import { checkWayback, formatWaybackTimestamp } from './wayback'
 import {
@@ -54,6 +55,52 @@ function isNullMx(mx: string[]): boolean {
 
 /** サブドメインの生存確認は DoH クエリ数がかさむため上限を設ける */
 const SUBDOMAIN_PROBE_LIMIT = 40
+
+interface Candidates {
+  /** 実際に検査したホスト名 */
+  probed: string[]
+  /** 上限を掛ける前の候補総数 */
+  total: number
+  ct: Awaited<ReturnType<typeof fetchIssuances>>
+  /** 網羅性に関する但し書き。結果に必ず添える */
+  notes: string[]
+}
+
+/**
+ * サブドメイン候補を組み立てる。
+ * CT ログと辞書の和集合。呼び出し元が複数あるが、CT も DoH もキャッシュされるため
+ * 実際の通信は 1 回で済む。
+ */
+async function collectCandidates(domain: string): Promise<Candidates> {
+  const ct = await fetchIssuances(domain)
+  const candidates = new Set<string>()
+  for (const name of ct.names) {
+    // ワイルドカードは実ホストではないので候補にしない
+    if (name.startsWith('*.')) continue
+    if (name === domain || name.endsWith(`.${domain}`)) candidates.add(name)
+  }
+  for (const sub of COMMON_SUBDOMAINS) candidates.add(`${sub}.${domain}`)
+  candidates.delete(domain)
+
+  const list = [...candidates].sort()
+  const notes: string[] = []
+  if (!ct.ok && ct.reason) {
+    notes.push(`CT ログ: ${ct.reason}（辞書のみで検査しました）`)
+  } else {
+    // 未認証の certspotter は有効期限内の証明書しか返さない。
+    // 忘れられたホストほど証明書が失効しているため、ここは網羅ではない
+    notes.push(
+      'CT ログからは有効期限内の証明書しか取得できないため、証明書が失効したサブドメインは候補に入りません',
+    )
+  }
+  if (list.length > SUBDOMAIN_PROBE_LIMIT) {
+    notes.push(
+      `候補 ${list.length} 件のうち上限 ${SUBDOMAIN_PROBE_LIMIT} 件のみ検査しました。未検査 ${list.length - SUBDOMAIN_PROBE_LIMIT} 件`,
+    )
+  }
+
+  return { probed: list.slice(0, SUBDOMAIN_PROBE_LIMIT), total: list.length, ct, notes }
+}
 
 const CHECKS: Check[] = [
   {
@@ -201,18 +248,7 @@ const CHECKS: Check[] = [
     id: 'subdomains',
     label: 'サブドメインの残骸',
     run: async (domain) => {
-      const ct = await fetchIssuances(domain)
-      const candidates = new Set<string>()
-      for (const name of ct.names) {
-        if (name.startsWith('*.')) continue
-        if (name === domain || name.endsWith(`.${domain}`)) candidates.add(name)
-      }
-      for (const sub of COMMON_SUBDOMAINS) candidates.add(`${sub}.${domain}`)
-      candidates.delete(domain)
-
-      const list = [...candidates].sort()
-      const truncated = list.length > SUBDOMAIN_PROBE_LIMIT
-      const probed = list.slice(0, SUBDOMAIN_PROBE_LIMIT)
+      const { probed, ct, notes } = await collectCandidates(domain)
 
       const alive: string[] = []
       await Promise.all(
@@ -221,14 +257,6 @@ const CHECKS: Check[] = [
         }),
       )
       alive.sort()
-
-      const notes: string[] = []
-      if (!ct.ok && ct.reason) notes.push(`CT ログ: ${ct.reason}（辞書のみで検査しました）`)
-      if (truncated) {
-        notes.push(
-          `候補 ${list.length} 件のうち上限 ${SUBDOMAIN_PROBE_LIMIT} 件のみ検査しました。未検査 ${list.length - SUBDOMAIN_PROBE_LIMIT} 件`,
-        )
-      }
 
       return makeResult({
         id: 'subdomains',
@@ -245,6 +273,71 @@ const CHECKS: Check[] = [
           ? '各サブドメインの用途を確認し、参照元を切り替えてから DNS レコードを削除してください'
           : undefined,
         evidence: [...alive, ...notes],
+      })
+    },
+  },
+  {
+    id: 'dangling-cname',
+    label: 'dangling CNAME',
+    run: async (domain) => {
+      const { probed, notes } = await collectCandidates(domain)
+      const hosts = [domain, ...probed]
+
+      const inspections = (await Promise.all(hosts.map(inspectCname))).filter(
+        (i): i is CnameInspection => i !== null,
+      )
+
+      const dangling = inspections.filter((i) => i.verdict === 'dangling')
+      const nodata = inspections.filter((i) => i.verdict === 'nodata')
+      const prone = inspections.filter((i) => i.verdict === 'takeover-prone')
+
+      const evidence = [
+        ...dangling.map(describeVerdict),
+        ...nodata.map(describeVerdict),
+        ...prone.map(describeVerdict),
+        ...notes,
+      ]
+
+      if (dangling.length || nodata.length) {
+        return makeResult({
+          id: 'dangling-cname',
+          phase: 'detach',
+          title: '向き先が切れた CNAME',
+          severity: 'critical',
+          status: 'action',
+          summary:
+            `${dangling.length + nodata.length} 件の CNAME が、解決できない向き先を指しています` +
+            (prone.length ? `（ほかに乗っ取られやすい向き先が ${prone.length} 件）` : ''),
+          advice:
+            '向き先のリソースを第三者が再取得すると、このサブドメインを名乗られます。' +
+            'ドメインを手放す前に CNAME を削除してください。',
+          evidence,
+        })
+      }
+
+      if (prone.length) {
+        return makeResult({
+          id: 'dangling-cname',
+          phase: 'detach',
+          title: '向き先が切れた CNAME',
+          severity: 'critical',
+          status: 'warn',
+          summary: `${prone.length} 件の CNAME が、解放後に再取得されうるサービスを指しています`,
+          advice:
+            'これらは名前解決には成功するため、DNS だけでは生きているか判断できません。' +
+            '各サービス側でリソースが実在するかを確認してください。',
+          evidence,
+        })
+      }
+
+      return makeResult({
+        id: 'dangling-cname',
+        phase: 'detach',
+        title: '向き先が切れた CNAME',
+        severity: 'critical',
+        status: 'clear',
+        summary: '向き先が切れた CNAME は見つかりませんでした',
+        evidence: notes,
       })
     },
   },
