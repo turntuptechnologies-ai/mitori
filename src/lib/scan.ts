@@ -15,6 +15,7 @@ import { NSEC_MODE_LABEL, WALK_STOP_LABEL, walkZone, type WalkResult } from './n
 import { lookupRdap } from './rdap'
 import { checkWayback, formatWaybackTimestamp } from './wayback'
 import { fetchWikimediaLinks, WIKIMEDIA_PROJECTS, type WikimediaResult } from './wikimedia'
+import { profileOf, type Exposure } from './tld'
 import {
   COMMON_SUBDOMAINS,
   DKIM_SELECTORS,
@@ -164,7 +165,53 @@ function backlinkEvidence(wm: WikimediaResult): string[] {
   return [...new Set(lines)]
 }
 
+/**
+ * ドメイン種別は直せるものではないので進捗の母数に入れない（severity: info）。
+ * ただし「誰にでも取られる種別か」は結果の読み方を変えるので、状態には反映する。
+ */
+const EXPOSURE_STATUS: Record<Exposure, CheckResult['status']> = {
+  closed: 'clear',
+  screened: 'clear',
+  domestic: 'warn',
+  global: 'warn',
+  unclear: 'unknown',
+}
+
 const CHECKS: Check[] = [
+  {
+    id: 'tld-kind',
+    label: 'ドメイン種別',
+    run: async (domain) => {
+      const p = profileOf(domain)
+      return makeResult({
+        id: 'tld-kind',
+        phase: 'release',
+        title: '手放した後、誰が取得しうるか',
+        severity: 'info',
+        status: EXPOSURE_STATUS[p.exposure],
+        summary: `${p.label}。${p.whoCanTake}`,
+        advice:
+          p.exposure === 'screened'
+            ? '資格審査で守られている種別です。ただし審査を通る同種の組織なら取得できます。'
+            : p.exposure === 'unclear'
+              ? '制度が特定できないため、失効後に誰が取得しうるかを mitori では判定できません。'
+              : '手放さずに保持し続けることが、最も確実な対策です。' +
+                '保持できない事情があるなら、参照が十分に減るまで冷却期間を置いてください。',
+        evidence: [`再登録まで: ${p.freeze}`, ...p.notes],
+        // 属性型は組織が消えると廃止が義務になり、保持し続ける選択肢が消える
+        tasks:
+          p.exposure === 'screened'
+            ? [
+                makeTask(
+                  'judge-successor',
+                  'attribute-jp',
+                  '組織の解散・廃校が絡む場合は引き継ぎ先を決める（属性型 JP は登録資格を失うと廃止の届け出が義務）',
+                ),
+              ]
+            : [],
+      })
+    },
+  },
   {
     id: 'domain-exists',
     label: 'ドメインの存在',
