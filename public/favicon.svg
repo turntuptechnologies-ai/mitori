@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="12" fill="#1c1917" />
+  <!-- 線香から立ちのぼる煙。時間をかけて静かに消えていくことの図示 -->
+  <path
+    d="M32 44 C24 36 40 30 32 20 C26 13 34 10 34 6"
+    fill="none"
+    stroke="#d6d3d1"
+    stroke-width="3.5"
+    stroke-linecap="round"
+  />
+  <rect x="29.5" y="44" width="5" height="14" rx="2.5" fill="#9f4436" />
+</svg>
