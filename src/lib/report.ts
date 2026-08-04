@@ -1,6 +1,12 @@
 import type { ScanReport } from './types'
 import { SEVERITY_LABEL } from './types'
-import { collectTasks, MANUAL_ITEMS, MANUAL_PHASE_LABEL, type ManualItem } from './manual'
+import {
+  collectTasks,
+  MANUAL_CATEGORY_LABEL,
+  MANUAL_ITEMS,
+  MANUAL_PHASE_LABEL,
+  type ManualItem,
+} from './manual'
 
 const STATUS_MARK: Record<string, string> = {
   clear: '✓',
@@ -70,7 +76,8 @@ export function toMarkdown(report: ScanReport, checked: Set<string>): string {
     lines.push(`### ${MANUAL_PHASE_LABEL[phase]}`)
     lines.push('')
     for (const item of items) {
-      lines.push(`- [${checked.has(item.id) ? 'x' : ' '}] ${item.text}`)
+      const category = MANUAL_CATEGORY_LABEL[item.category]
+      lines.push(`- [${checked.has(item.id) ? 'x' : ' '}] （${category}）${item.text}`)
       for (const task of tasks.get(item.id) ?? []) {
         lines.push(`  - [${checked.has(task.id) ? 'x' : ' '}] ${task.text}`)
       }
