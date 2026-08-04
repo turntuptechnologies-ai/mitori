@@ -14,6 +14,7 @@ import { describeVerdict, inspectCname, isServiceName, type CnameInspection } fr
 import { NSEC_MODE_LABEL, WALK_STOP_LABEL, walkZone, type WalkResult } from './nsec'
 import { lookupRdap } from './rdap'
 import { checkWayback, formatWaybackTimestamp } from './wayback'
+import { fetchWikimediaLinks, WIKIMEDIA_PROJECTS, type WikimediaResult } from './wikimedia'
 import {
   COMMON_SUBDOMAINS,
   DKIM_SELECTORS,
@@ -128,6 +129,38 @@ async function collectCandidates(domain: string): Promise<Candidates> {
   }
 
   return { probed: list.slice(0, SUBDOMAIN_PROBE_LIMIT), total: list.length, ct, notes }
+}
+
+/** 根拠として並べるページ名の上限。超えた分は件数だけ出す */
+const BACKLINK_EVIDENCE_LIMIT = 12
+
+function backlinkEvidence(wm: WikimediaResult): string[] {
+  const lines: string[] = []
+
+  for (const p of wm.found) {
+    const counts = [`本文 ${p.articles.length} ページ`]
+    if (p.others.length) counts.push(`本文以外 ${p.others.length} ページ`)
+    lines.push(`${p.project.label}: ${counts.join(' / ')}${p.truncated ? '（上限で打ち切り）' : ''}`)
+    for (const title of p.articles.slice(0, BACKLINK_EVIDENCE_LIMIT)) {
+      lines.push(`${p.project.host} — ${title}`)
+    }
+    const rest = p.articles.length - BACKLINK_EVIDENCE_LIMIT
+    if (rest > 0) lines.push(`${p.project.host} — ほか ${rest} ページ`)
+  }
+
+  // 照会できなかったプロジェクトを 0 件と混ぜない
+  for (const p of wm.projects) {
+    if (p.state !== 'ok') lines.push(`${p.project.label}: ${p.reason}`)
+  }
+
+  // 「見つからなかった」を「参照が無い」と読ませないための但し書き
+  lines.push(
+    `調査対象は Wikimedia の ${WIKIMEDIA_PROJECTS.length} プロジェクトだけです。` +
+      '言語版は 300 以上あり、Wikimedia 以外の被リンクは調べていません',
+  )
+
+  // 表示側がリストのキーに使うため、同一行は残さない
+  return [...new Set(lines)]
 }
 
 const CHECKS: Check[] = [
@@ -715,6 +748,74 @@ const CHECKS: Check[] = [
           ? '過去の内容は残り続けます。冷却期間の長さは、この種の消せない参照の寿命で決めてください'
           : undefined,
         evidence: wb.url ? [wb.url] : undefined,
+      })
+    },
+  },
+  {
+    id: 'backlinks-wikimedia',
+    label: '百科事典からの参照',
+    run: async (domain) => {
+      const title = '百科事典からの参照（Wikipedia ほか）'
+      const wm = await fetchWikimediaLinks(domain)
+
+      if (!wm.ok) {
+        return makeResult({
+          id: 'backlinks-wikimedia',
+          phase: 'inventory',
+          title,
+          severity: 'high',
+          status: 'unknown',
+          summary: 'Wikimedia のどのプロジェクトにも問い合わせできませんでした',
+        })
+      }
+
+      const evidence = backlinkEvidence(wm)
+      const unchecked = wm.failed.length + wm.skipped.length
+
+      if (wm.pages === 0) {
+        return makeResult({
+          id: 'backlinks-wikimedia',
+          phase: 'inventory',
+          title,
+          severity: 'high',
+          // 照会できていないプロジェクトがあるなら「痕跡なし」とは言えない
+          status: unchecked ? 'warn' : 'clear',
+          summary: unchecked
+            ? `照会できた ${wm.queried} プロジェクトからの参照は見つかりませんでしたが、` +
+              `残る ${unchecked} プロジェクトは確認できていません`
+            : `調査した ${wm.queried} プロジェクトからの参照は見つかりませんでした`,
+          advice: unchecked
+            ? '時間をおいて再検査すると、確認できなかったプロジェクトも照会できます。'
+            : undefined,
+          evidence,
+        })
+      }
+
+      // 本文からの参照だけが百科事典としての信頼を引き継ぐ。
+      // ノートや利用者ページからの言及は残っていても実害が小さいので区別する
+      const fromArticles = wm.articles > 0
+
+      return makeResult({
+        id: 'backlinks-wikimedia',
+        phase: 'inventory',
+        title,
+        severity: 'high',
+        status: fromArticles ? 'action' : 'warn',
+        summary:
+          (fromArticles
+            ? `百科事典の本文 ${wm.articles} ページから参照されています`
+            : `ノート・利用者ページなど ${wm.pages} ページから参照されています。本文からの参照はありません`) +
+          // 打ち切りと未照会は原因が違うが、読み手にとっての意味は同じ「まだ下がある」
+          (wm.truncated || unchecked
+            ? '（確認できていない範囲があるため、実際はこれより多い可能性があります）'
+            : ''),
+        advice: fromArticles
+          ? '出典に書かれた URL は、ドメインを手放しても書き換わりません。' +
+            '新しい所有者が百科事典の信頼をそのまま引き継ぎ、出典元の内容を差し替えられます。' +
+            '手放す前に、各出典をアーカイブ版へ差し替えてください（自分で編集するか、ノートで依頼する）。' +
+            'アーカイブが無いページは、消える前にスナップショットを取っておく必要があります。'
+          : '本文からの参照ではないため急ぎませんが、リンク先が第三者のものになることは変わりません。',
+        evidence,
       })
     },
   },

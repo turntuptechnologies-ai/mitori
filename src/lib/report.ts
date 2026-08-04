@@ -82,7 +82,9 @@ export function toMarkdown(report: ScanReport, checked: Set<string>): string {
 
   lines.push('---')
   lines.push('')
-  lines.push('mitori (看取り) で生成 — 自動判定は DNS / CT ログ / RDAP から観測できる範囲に限られます。')
+  lines.push(
+    'mitori (看取り) で生成 — 自動判定は DNS / CT ログ / RDAP / Wikimedia から観測できる範囲に限られます。',
+  )
   return lines.join('\n')
 }
 
