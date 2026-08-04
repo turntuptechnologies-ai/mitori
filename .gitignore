@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Claude Code のセッション引き継ぎ書（ローカル専用）
+.claude/handoff/
