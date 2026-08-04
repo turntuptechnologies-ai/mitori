@@ -96,7 +96,8 @@ export default function App() {
         <p className="mt-3 text-sm leading-relaxed text-stone-600 dark:text-stone-400">
           手放そうとしているドメインに、まだ何が繋がっているかを調べます。
           <br />
-          DNS・証明書透明性ログ・RDAP だけを使うので、検査はすべてブラウザの中で完結します。
+          DNS・証明書透明性ログ・RDAP・Wikimedia
+          だけを使うので、検査はすべてブラウザの中で完結します。
         </p>
       </header>
 
@@ -178,14 +179,15 @@ export default function App() {
 
       {domain && report && (
         <div className="mt-12">
-          <ManualChecklist checked={checked} onToggle={toggle} />
+          <ManualChecklist results={report.results} checked={checked} onToggle={toggle} />
         </div>
       )}
 
       <footer className="mt-16 border-t border-stone-200 pt-6 text-xs leading-relaxed text-stone-500 dark:border-stone-800">
         <p>
-          自動判定は DNS・CT ログ・RDAP
-          から観測できる範囲に限られます。被リンクや印刷物のような参照、契約や届出に書かれた連絡先は検出できません。
+          自動判定は DNS・CT ログ・RDAP・Wikimedia
+          から観測できる範囲に限られます。被リンクは Wikimedia
+          からの参照しか見ておらず、印刷物のような参照、どのサービスにこのドメインのメールアドレスを登録したか、契約や届出に書かれた連絡先は検出できません。
           進捗 100% は「観測できる痕跡が無い」という意味であって、「手放してよい」という意味ではありません。
         </p>
       </footer>

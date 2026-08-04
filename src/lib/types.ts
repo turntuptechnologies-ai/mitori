@@ -31,6 +31,21 @@ export const SEVERITY_LABEL: Record<Severity, string> = {
 
 export const SEVERITY_ORDER: Severity[] = ['critical', 'high', 'medium', 'low', 'info']
 
+/**
+ * 観測結果から作った、このドメイン固有の作業。手動チェックリストの項目にぶら下げる。
+ *
+ * チェックリストは「Microsoft 365 などのドメイン所有権を解除した」のような一般論でしか
+ * 書けない。一方で検査のほうは、実際にどのサービスが紐付いているかを知っている。
+ * 知っている側から具体名を流し込むことで、汎用の心得をそのドメインの作業に変える。
+ */
+export interface DerivedTask {
+  /** 流し込み先の手動チェックリスト項目 id */
+  target: string
+  /** チェック状態の保存に使う id。同じものが観測され続ける限り変わらない */
+  id: string
+  text: string
+}
+
 export interface CheckResult {
   id: string
   phase: Phase
@@ -45,6 +60,8 @@ export interface CheckResult {
   advice?: string
   /** 判定根拠の生データ */
   evidence?: string[]
+  /** この観測から導いた具体的な作業 */
+  tasks?: DerivedTask[]
 }
 
 export interface ScanReport {

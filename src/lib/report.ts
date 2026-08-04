@@ -1,6 +1,6 @@
 import type { ScanReport } from './types'
 import { SEVERITY_LABEL } from './types'
-import { MANUAL_ITEMS, MANUAL_PHASE_LABEL, type ManualItem } from './manual'
+import { collectTasks, MANUAL_ITEMS, MANUAL_PHASE_LABEL, type ManualItem } from './manual'
 
 const STATUS_MARK: Record<string, string> = {
   clear: '✓',
@@ -53,11 +53,13 @@ export function toMarkdown(report: ScanReport, checked: Set<string>): string {
   section('判定できなかった項目', unknown)
   section('痕跡が残っていない項目', clear)
 
-  lines.push('## 手動確認項目')
+  lines.push('## 確認項目')
   lines.push('')
   lines.push('DNS からは観測できないため、mitori では判定できない項目。')
+  lines.push('入れ子になっているものは、今回の検査で見つかったものから作られた具体的な作業。')
   lines.push('')
 
+  const tasks = collectTasks(report.results)
   const byPhase = new Map<ManualItem['phase'], ManualItem[]>()
   for (const item of MANUAL_ITEMS) {
     const list = byPhase.get(item.phase) ?? []
@@ -69,6 +71,9 @@ export function toMarkdown(report: ScanReport, checked: Set<string>): string {
     lines.push('')
     for (const item of items) {
       lines.push(`- [${checked.has(item.id) ? 'x' : ' '}] ${item.text}`)
+      for (const task of tasks.get(item.id) ?? []) {
+        lines.push(`  - [${checked.has(task.id) ? 'x' : ' '}] ${task.text}`)
+      }
     }
     lines.push('')
   }

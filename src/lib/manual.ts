@@ -7,6 +7,8 @@
  * 自動判定できる項目だけを見せると「full clear なので手放してよい」と誤読されるため、
  * 判定不能な項目こそ明示的に並べる。
  */
+import type { CheckResult, DerivedTask } from './types'
+
 export interface ManualItem {
   id: string
   phase: 'judge' | 'inventory' | 'detach' | 'cooldown' | 'release' | 'after'
@@ -24,7 +26,10 @@ export const MANUAL_PHASE_LABEL: Record<ManualItem['phase'], string> = {
   after: 'F. 事後監視',
 }
 
-export const MANUAL_ITEMS: ManualItem[] = [
+// `as const satisfies` で id を文字列リテラルのまま保つ。これが ManualItemId の素になり、
+// 存在しない項目へタスクを流し込む書き間違いを型で弾く。
+// 表示側は note の有無を気にせず扱いたいので、公開するのは下の広げた型のほう
+const ITEMS = [
   {
     id: 'judge-keep',
     phase: 'judge',
@@ -166,4 +171,43 @@ export const MANUAL_ITEMS: ManualItem[] = [
     phase: 'after',
     text: '自分の側に残った設定・ブックマーク・ドキュメントを掃除した',
   },
-]
+] as const satisfies readonly ManualItem[]
+
+export const MANUAL_ITEMS: readonly ManualItem[] = ITEMS
+
+export type ManualItemId = (typeof ITEMS)[number]['id']
+
+/**
+ * 観測結果から具体タスクを作る。
+ *
+ * `key` には件数のような変動する値ではなく、観測対象そのもの（サービス名・ホスト名）を渡す。
+ * ここが変わると id が変わり、利用者がチェック済みにした状態が失われる。
+ * 逆に文言はいくら変わってもよい。
+ */
+export function makeTask(target: ManualItemId, key: string, text: string): DerivedTask {
+  return { target, id: `${target}:${key.trim().toLowerCase().replace(/\s+/g, '-')}`, text }
+}
+
+const KNOWN_ITEMS = new Set<string>(MANUAL_ITEMS.map((i) => i.id))
+
+/**
+ * 検査結果から、チェックリスト項目ごとの具体タスクを集める。
+ *
+ * 同じ相手を複数の検査が指すことがある（Microsoft 365 は所有権トークンと
+ * グループウェア連携の両方から出る）ため、id で重複を落とす。
+ */
+export function collectTasks(results: CheckResult[]): Map<string, DerivedTask[]> {
+  const byTarget = new Map<string, DerivedTask[]>()
+
+  for (const result of results) {
+    for (const task of result.tasks ?? []) {
+      // 存在しない項目に紐づいたタスクは表示先が無いので捨てる
+      if (!KNOWN_ITEMS.has(task.target)) continue
+      const list = byTarget.get(task.target) ?? []
+      if (!list.some((t) => t.id === task.id)) list.push(task)
+      byTarget.set(task.target, list)
+    }
+  }
+
+  return byTarget
+}
