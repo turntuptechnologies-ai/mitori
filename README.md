@@ -87,3 +87,7 @@ npx tsx scripts/probe.ts example.com
 
 `main` への push で GitHub Pages に配信される (`.github/workflows/deploy.yml`)。
 リポジトリ名がパスに入るため、ビルド時に `MITORI_BASE` で base を差し替えている。
+
+## ライセンス
+
+[MIT](LICENSE)
